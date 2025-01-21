@@ -11,6 +11,9 @@ import {
 } from './utils/helper.js';
 import readline from 'readline';
 
+const MAX_RETRIES = 20;
+const RETRY_DELAY = 5000;
+
 function getInviteCode() {
     return new Promise((resolve) => {
         const rl = readline.createInterface({
@@ -101,19 +104,27 @@ async function register(email, pw, pw_re, valid_code, invite_code, proxy) {
     }
 }
 
-async function waitForEmail(mailjs, retries = 10, delay = 5000) {
+async function waitForEmail(mailjs, retries = MAX_RETRIES, delay = RETRY_DELAY) {
     for (let i = 0; i < retries; i++) {
-        const messages = await mailjs.getMessages();
-        if (messages.data.length > 0) {
-            const message = messages.data[0];
-            const fullMessage = await mailjs.getMessage(message.id);
+        try {
+            const messages = await mailjs.getMessages();
+            if (messages.data.length > 0) {
+                const message = messages.data[0];
+                const fullMessage = await mailjs.getMessage(message.id);
 
-            const match = fullMessage.data.text.match(/Please complete the email address verification with this code.\s+Thank you.\s+(\d{6})/);
-            if (match) return match[1];
+                const match = fullMessage.data.text.match(/Please complete the email address verification with this code.\s+Thank you.\s+(\d{6})/);
+                if (match) {
+                    log.info(`OTP found on attempt ${i + 1}`);
+                    return match[1];
+                }
+            }
+            log.warn(`Attempt ${i + 1}/${retries}: No OTP email found yet`);
+        } catch (error) {
+            log.warn(`Attempt ${i + 1}/${retries} failed: ${error.message}`);
         }
-        await new Promise(resolve => setTimeout(resolve, delay));
+        if (i < retries - 1) await new Promise(resolve => setTimeout(resolve, delay));
     }
-    throw new Error('Verification email not received.');
+    throw new Error(`Failed to receive OTP email after ${retries} attempts`);
 }
 
 async function main() {
@@ -126,10 +137,13 @@ async function main() {
     }
 
     let proxyIndex = 0
-    const invite_code = await getInviteCode() // `678b90d462361`
+    const invite_code = "678d1bfc5f6df"; //await getInviteCode() // `678b90d462361`
     log.warn(`Starting Running Program [ CTRL + C ] to exit...`)
 
     while (true) {
+        let email = null;
+        let mailAccount = null;
+        
         try {
             const proxy = proxies[proxyIndex] || null;
             proxyIndex = (proxyIndex + 1) % proxies.length
@@ -140,50 +154,85 @@ async function main() {
                 account = await mailjs.createOneAccount();
             }
 
-            const email = account.data.username;
+            email = account.data.username;  // Assign value to email
             const pass = account.data.password;
             const password = `${pass}Ari321#`
 
             log.info('Trying to register email:', `${email} with invited Code: ${invite_code}`);
             log.info('Register Using Proxy:', proxy || "without proxy");
-            let sendingOtp = await sendOtp(email, proxy);
-            while (!sendingOtp) {
-                log.warn('Failed to send OTP, Retrying...');
-                await delay(3)
-                sendingOtp = await sendOtp(email, proxy);
+
+            let otpReceived = false;
+            let attempts = 0;
+            
+            while (!otpReceived && attempts < 3) {
+                try {
+                    let sendingOtp = await sendOtp(email, proxy);
+                    if (!sendingOtp) {
+                        throw new Error('Failed to send OTP');
+                    }
+
+                    await mailjs.login(email, password);
+                    const otp = await waitForEmail(mailjs);
+                    
+                    if (otp) {
+                        log.info(`Email ${email} received OTP:`, otp);
+                        const valid_code = await checkCode(email, otp, proxy);
+                        
+                        if (valid_code) {
+                            let response = await register(
+                                email,
+                                password,
+                                password,
+                                valid_code,
+                                invite_code,
+                                proxy
+                            );
+                            while (!response) {
+                                log.warn(`Failed to registering ${email}, retrying...`)
+                                await delay(1)
+                                response = await register(
+                                    email,
+                                    password,
+                                    password,
+                                    valid_code,
+                                    invite_code,
+                                    proxy
+                                );
+                            }
+                            
+                            // Save original format to accounts.txt
+                            await saveToFile('accounts.txt', `${email}|${password}`);
+                            
+                            // Save extended info to separate file
+                            if (response.status === "success" && response.result) {
+                                const detailedInfo = `${response.result.address}|${response.result.master_key}|${response.result.invite_code}`;
+                                await saveToFile('accounts_info.txt', detailedInfo);
+                                log.info(`Additional account info saved to accounts_info.txt`);
+                            }
+                            otpReceived = true;
+                        }
+                    }
+                } catch (error) {
+                    attempts++;
+                    log.warn(`OTP attempt ${attempts}/3 failed: ${error.message}`);
+                    await delay(3);
+                }
             }
 
-            await mailjs.login(email, password);
-            const otp = await waitForEmail(mailjs)
-            log.info(`Email ${email} received OTP:`, otp);
-            const valid_code = await checkCode(email, otp, proxy);
-
-            if (valid_code) {
-                let response = await register(
-                    email,
-                    password,
-                    password,
-                    valid_code,
-                    invite_code,
-                    proxy
-                );
-                while (!response) {
-                    log.warn(`Failed to registering ${email}, retrying...`)
-                    await delay(1)
-                    response = await register(
-                        email,
-                        password,
-                        password,
-                        valid_code,
-                        invite_code,
-                        proxy
-                    );
-                }
-                await saveToFile('accounts.txt', `${email}|${password}`)
+            if (!otpReceived) {
+                throw new Error('Maximum OTP attempts reached, skipping to next account');
             }
 
         } catch (error) {
             log.error(`Error when registering ${email}:`, error.message);
+        } finally {
+            if (mailAccount) {
+                try {
+                    await mailjs.logout();
+                } catch (e) {
+                    log.warn('Failed to logout mail session');
+                }
+            }
         }
         await delay(3)
     }
