@@ -115,3 +115,4 @@ class TempMailClient {
 }
 
 export default TempMailClient;
+
