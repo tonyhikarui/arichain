@@ -136,8 +136,8 @@ async function main() {
         log.warn(`Running without proxy...`);
     }
 
-    let proxyIndex = 0
-    const invite_code = "678d1bfc5f6df"; //await getInviteCode() // `678b90d462361`
+    let index = 0;  // Single index for both task and proxy tracking
+    const invite_code = "678d1bfc5f6df";
     log.warn(`Starting Running Program [ CTRL + C ] to exit...`)
 
     while (true) {
@@ -145,8 +145,11 @@ async function main() {
         let mailAccount = null;
         
         try {
-            const proxy = proxies[proxyIndex] || null;
-            proxyIndex = (proxyIndex + 1) % proxies.length
+            const proxy = proxies[index] || null;
+            log.info(`Starting Task/Proxy #${index + 1}/${proxies.length || 1}`);
+            
+            index = (index + 1) % (proxies.length || 1);  // Cycle through proxies
+            
             let account = await mailjs.createOneAccount();
             while (!account?.data?.username) {
                 log.warn('Failed To Generate New Email, Retrying...');
@@ -224,7 +227,7 @@ async function main() {
             }
 
         } catch (error) {
-            log.error(`Error when registering ${email}:`, error.message);
+            log.error(`Task #${index} Error when registering ${email}:`, error.message);
         } finally {
             if (mailAccount) {
                 try {
