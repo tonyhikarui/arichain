@@ -11,9 +11,6 @@ import {
 } from './utils/helper.js';
 import readline from 'readline';
 
-const MAX_RETRIES = 20;
-const RETRY_DELAY = 5000;
-
 function getInviteCode() {
     return new Promise((resolve) => {
         const rl = readline.createInterface({
@@ -128,14 +125,11 @@ async function main() {
         log.warn(`Running without proxy...`);
     }
 
-    let index = 0;  // Single index for both task and proxy tracking
-    const invite_code = "678d1bfc5f6df";
+    let proxyIndex = 0
+    const invite_code = await getInviteCode() // `678b90d462361`
     log.warn(`Starting Running Program [ CTRL + C ] to exit...`)
 
     while (true) {
-        let email = null;
-        let mailAccount = null;
-        
         try {
             const proxy = proxies[proxyIndex] || null;
             proxyIndex = (proxyIndex + 1) % proxies.length
