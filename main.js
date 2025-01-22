@@ -1,8 +1,8 @@
-import Mailjs from '@cemalgnlts/mailjs';
 import FormData from 'form-data';
 import axios from 'axios';
 import log from './utils/logger.js'
 import beddus from './utils/banner.js'
+import TempMailClient from './utils/mail.js';
 import {
     delay,
     saveToFile,
@@ -28,8 +28,6 @@ function getInviteCode() {
     });
 }
 
-const mailjs = new Mailjs();
-
 async function sendOtp(email, proxy) {
     const agent = newAgent(proxy);
     const form = new FormData();
@@ -48,7 +46,7 @@ async function sendOtp(email, proxy) {
         log.info('Sending OTP Result:', response.data);
         return response.data;
     } catch (error) {
-        log.error('Error When Sending OTP got error code:', error.status);
+        log.error('Error When Sending OTP got error code:', error.message);
         return null;
     }
 }
@@ -99,32 +97,26 @@ async function register(email, pw, pw_re, valid_code, invite_code, proxy) {
         log.info('Register Result:', response.data);
         return response.data;
     } catch (error) {
-        log.error(`Error when registering ${email} got error code:`, error.status);
+        log.error(`Error when registering got error code:`, error.status);
         return null;
     }
 }
 
-async function waitForEmail(mailjs, retries = MAX_RETRIES, delay = RETRY_DELAY) {
-    for (let i = 0; i < retries; i++) {
-        try {
-            const messages = await mailjs.getMessages();
-            if (messages.data.length > 0) {
-                const message = messages.data[0];
-                const fullMessage = await mailjs.getMessage(message.id);
+function generatePassword(length = 12) {
+    const uppercaseLetters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    const lowercaseLetters = 'abcdefghijklmnopqrstuvwxyz';
+    const numbers = '0123456789';
+    const specialCharacters = '!@#$%^&*()_+[]{}|;:,.<>?';
 
-                const match = fullMessage.data.text.match(/Please complete the email address verification with this code.\s+Thank you.\s+(\d{6})/);
-                if (match) {
-                    log.info(`OTP found on attempt ${i + 1}`);
-                    return match[1];
-                }
-            }
-            log.warn(`Attempt ${i + 1}/${retries}: No OTP email found yet`);
-        } catch (error) {
-            log.warn(`Attempt ${i + 1}/${retries} failed: ${error.message}`);
-        }
-        if (i < retries - 1) await new Promise(resolve => setTimeout(resolve, delay));
+    const allCharacters = uppercaseLetters + lowercaseLetters + numbers + specialCharacters;
+
+    let password = '';
+    for (let i = 0; i < length; i++) {
+        const randomIndex = Math.floor(Math.random() * allCharacters.length);
+        password += allCharacters[randomIndex];
     }
-    throw new Error(`Failed to receive OTP email after ${retries} attempts`);
+
+    return password;
 }
 
 async function main() {
@@ -145,100 +137,80 @@ async function main() {
         let mailAccount = null;
         
         try {
-            const proxy = proxies[index] || null;
-            log.info(`Starting Task/Proxy #${index + 1}/${proxies.length || 1}`);
-            
-            index = (index + 1) % (proxies.length || 1);  // Cycle through proxies
-            
-            let account = await mailjs.createOneAccount();
-            while (!account?.data?.username) {
+            const proxy = proxies[proxyIndex] || null;
+            proxyIndex = (proxyIndex + 1) % proxies.length
+            log.info('Creating email and Register Using Proxy:', proxy || "without proxy");
+            const tempMailClient = new TempMailClient(proxy);
+
+            let emailData = await tempMailClient.createEmail();
+            while (!emailData?.address) {
                 log.warn('Failed To Generate New Email, Retrying...');
                 await delay(3)
-                account = await mailjs.createOneAccount();
+                emailData = await tempMailClient.createEmail();
             }
 
-            email = account.data.username;  // Assign value to email
-            const pass = account.data.password;
-            const password = `${pass}Ari321#`
+            const email = emailData.address;
+            const password = generatePassword(12);
 
             log.info('Trying to register email:', `${email} with invited Code: ${invite_code}`);
-            log.info('Register Using Proxy:', proxy || "without proxy");
 
-            let otpReceived = false;
-            let attempts = 0;
-            
-            while (!otpReceived && attempts < 3) {
-                try {
-                    let sendingOtp = await sendOtp(email, proxy);
-                    if (!sendingOtp) {
-                        throw new Error('Failed to send OTP');
-                    }
-
-                    await mailjs.login(email, password);
-                    const otp = await waitForEmail(mailjs);
-                    
-                    if (otp) {
-                        log.info(`Email ${email} received OTP:`, otp);
-                        const valid_code = await checkCode(email, otp, proxy);
-                        
-                        if (valid_code) {
-                            let response = await register(
-                                email,
-                                password,
-                                password,
-                                valid_code,
-                                invite_code,
-                                proxy
-                            );
-                            while (!response) {
-                                log.warn(`Failed to registering ${email}, retrying...`)
-                                await delay(1)
-                                response = await register(
-                                    email,
-                                    password,
-                                    password,
-                                    valid_code,
-                                    invite_code,
-                                    proxy
-                                );
-                            }
-                            
-                            // Save original format to accounts.txt
-                            await saveToFile('accounts.txt', `${email}|${password}`);
-                            
-                            // Save extended info to separate file
-                            if (response.status === "success" && response.result) {
-                                const detailedInfo = `${response.result.address}|${response.result.master_key}|${response.result.invite_code}`;
-                                await saveToFile('accounts_info.txt', detailedInfo);
-                                log.info(`Additional account info saved to accounts_info.txt`);
-                            }
-                            otpReceived = true;
-                        }
-                    }
-                } catch (error) {
-                    attempts++;
-                    log.warn(`OTP attempt ${attempts}/3 failed: ${error.message}`);
-                    await delay(3);
-                }
+            let sendingOtp = await sendOtp(email, proxy);
+            while (!sendingOtp) {
+                log.warn('Failed to send OTP, Retrying...');
+                await delay(3)
+                sendingOtp = await sendOtp(email, proxy);
             }
 
-            if (!otpReceived) {
-                throw new Error('Maximum OTP attempts reached, skipping to next account');
+            log.info('Checking Otp For Email:', email);
+            await tempMailClient.createInbox();
+            let inboxMessages = await tempMailClient.getInbox();
+            while (inboxMessages.messages.length === 0) {
+                log.warn('No Otp Found, Rechecking in 3 seconds...');
+                await delay(3)
+                inboxMessages = await tempMailClient.getInbox();
+            }
+
+            if (inboxMessages.messages.length > 0) {
+                const message = inboxMessages.messages[0];
+                const messageToken = await tempMailClient.getMessageToken(message.mid);
+                const messageContent = await tempMailClient.getMessageContent(messageToken);
+
+                const otp = tempMailClient.extractOtp(messageContent.body);
+                log.info(`Email ${email} received OTP:`, otp);
+                const valid_code = await checkCode(email, otp, proxy);
+
+                if (valid_code) {
+                    let response = await register(
+                        email,
+                        password,
+                        password,
+                        valid_code,
+                        invite_code,
+                        proxy
+                    );
+                    while (!response) {
+                        log.warn(`Failed to registering ${email}, retrying...`)
+                        await delay(1)
+                        response = await register(
+                            email,
+                            password,
+                            password,
+                            valid_code,
+                            invite_code,
+                            proxy
+                        );
+                    }
+                    await saveToFile('accounts.txt', `${email}|${password}`)
+                }
+            } else {
+                console.log('No messages found in the inbox.');
             }
 
         } catch (error) {
-            log.error(`Task #${index} Error when registering ${email}:`, error.message);
-        } finally {
-            if (mailAccount) {
-                try {
-                    await mailjs.logout();
-                } catch (e) {
-                    log.warn('Failed to logout mail session');
-                }
-            }
+            log.error(`Error when registering:`, error.message);
         }
         await delay(3)
     }
 }
-
+//run
 main()
